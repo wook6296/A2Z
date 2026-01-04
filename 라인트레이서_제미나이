@@ -1,0 +1,70 @@
+#include <Servo.h>
+
+// --- 핀 설정 ---
+const int SERVO_PIN = 9;       // 서보 모터 핀
+const int MOTOR_IN1 = 7;       // DC 모터 방향 1
+const int MOTOR_IN2 = 8;       // DC 모터 방향 2
+const int MOTOR_PWM = 5;       // DC 모터 속도 (ENA)
+const int LEFT_SENSOR = A0;    // 왼쪽 IR 센서
+const int RIGHT_SENSOR = A1;   // 오른쪽 IR 센서
+
+// --- 조향 및 속도 설정 (값 수정 필요) ---
+const int CENTER_ANGLE = 90;   // 바퀴가 정면을 볼 때의 서보 각도
+const int LEFT_ANGLE = 60;     // 왼쪽으로 최대 꺾을 때 각도
+const int RIGHT_ANGLE = 120;   // 오른쪽으로 최대 꺾을 때 각도
+const int DRIVE_SPEED = 150;   // 기본 주행 속도 (0~255)
+
+Servo steeringServo;
+
+void setup() {
+  steeringServo.attach(SERVO_PIN);
+  steeringServo.write(CENTER_ANGLE); // 초기 정면 정렬
+
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
+  pinMode(MOTOR_PWM, OUTPUT);
+  
+  pinMode(LEFT_SENSOR, INPUT);
+  pinMode(RIGHT_SENSOR, INPUT);
+
+  delay(2000); // 시작 전 2초 대기
+}
+
+void loop() {
+  // 센서 값 읽기 (검정선 감지 시 1(HIGH)이라고 가정)
+  // 만약 반대로 작동한다면 !digitalRead로 변경하세요.
+  int leftVal = digitalRead(LEFT_SENSOR);
+  int rightVal = digitalRead(RIGHT_SENSOR);
+
+  // 1. 전진 (두 센서 모두 선을 감지하거나, 둘 다 감지 안 할 때)
+  if (leftVal == HIGH && rightVal == HIGH) {
+    moveForward(DRIVE_SPEED, CENTER_ANGLE);
+  } 
+  // 2. 우회전 (왼쪽 센서가 선을 벗어남 -> 차가 왼쪽으로 치우침)
+  else if (leftVal == LOW && rightVal == HIGH) {
+    moveForward(DRIVE_SPEED, RIGHT_ANGLE);
+  } 
+  // 3. 좌회전 (오른쪽 센서가 선을 벗어남 -> 차가 오른쪽으로 치우침)
+  else if (leftVal == HIGH && rightVal == LOW) {
+    moveForward(DRIVE_SPEED, LEFT_ANGLE);
+  } 
+  // 4. 정지 (둘 다 감지 안 될 경우 등 상황에 맞춰 설정)
+  else {
+    stopMotor();
+  }
+}
+
+// 주행 함수
+void moveForward(int speed, int angle) {
+  steeringServo.write(angle);      // 조향 각도 조절
+  digitalWrite(MOTOR_IN1, HIGH);   // 모터 정방향
+  digitalWrite(MOTOR_IN2, LOW);
+  analogWrite(MOTOR_PWM, speed);   // 속도 제어
+}
+
+// 정지 함수
+void stopMotor() {
+  analogWrite(MOTOR_PWM, 0);
+  digitalWrite(MOTOR_IN1, LOW);
+  digitalWrite(MOTOR_IN2, LOW);
+}
