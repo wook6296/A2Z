@@ -1,0 +1,189 @@
+/*
+  line_tracer.ino
+  라인트레이서 (IR 2개, 앞바퀴 서보 조향, 2WD 구동)
+  - IR left: A0
+  - IR right: A1
+  - Servo: D9
+  - Motor left: IN1 D2, IN2 D3, ENA(D5 PWM)
+  - Motor right: IN3 D4, IN4 D7, ENB(D6 PWM)
+  
+  필요 라이브러리: Servo
+*/
+
+#include <Servo.h>
+
+// --- 핀 설정 ---
+const uint8_t IR_LEFT_PIN  = A0;
+const uint8_t IR_RIGHT_PIN = A1;
+
+const uint8_t SERVO_PIN = 9;
+
+// Left motor (H-bridge)
+const uint8_t L_IN1 = 2;
+const uint8_t L_IN2 = 3;
+const uint8_t L_EN  = 5; // PWM
+
+// Right motor (H-bridge)
+const uint8_t R_IN1 = 4;
+const uint8_t R_IN2 = 7;
+const uint8_t R_EN  = 6; // PWM
+
+// --- 제어 파라미터 (튜닝 필요) ---
+float Kp = 30.0;   // 비례 (degrees per normalized error)
+float Ki = 0.0;    // 적분
+float Kd = 15.0;   // 미분
+
+const int BASE_SPEED = 200; // 0..255 (기본 주행 속도)
+const int MIN_SPEED  = 90;  // 최소 속도 (코너시)
+const int MAX_TURN_ANGLE = 40; // 서보 중심에서 최대 +/- 각도 한계 (deg)
+
+const bool invertSensor = false; // 센서 출력이 선에서 더 작다면 false, 크면 true (필요시 변경)
+
+// --- 내부 상태 ---
+Servo steering;
+float integral = 0.0;
+float prevError = 0.0;
+unsigned long prevTime = 0;
+
+// 서보 중앙(직진) 각도: 실제 장비에서 서보 중립값 확인 후 조정하세요
+const int SERVO_CENTER = 90;
+const int SERVO_MIN = SERVO_CENTER - MAX_TURN_ANGLE; // 제한
+const int SERVO_MAX = SERVO_CENTER + MAX_TURN_ANGLE;
+
+void setup() {
+  Serial.begin(115200);
+  steering.attach(SERVO_PIN);
+  steering.write(SERVO_CENTER);
+
+  pinMode(L_IN1, OUTPUT);
+  pinMode(L_IN2, OUTPUT);
+  pinMode(L_EN, OUTPUT);
+
+  pinMode(R_IN1, OUTPUT);
+  pinMode(R_IN2, OUTPUT);
+  pinMode(R_EN, OUTPUT);
+
+  prevTime = millis();
+
+  // 초기 정지
+  setMotorPWM(0);
+  delay(200);
+  Serial.println("Line tracer ready");
+  Serial.println("Adjust Kp/Kd and base speed if needed.");
+}
+
+// 메인 루프
+void loop() {
+  unsigned long now = millis();
+  float dt = (now - prevTime) / 1000.0;
+  if (dt <= 0) dt = 0.001;
+  prevTime = now;
+
+  int rawL = analogRead(IR_LEFT_PIN);
+  int rawR = analogRead(IR_RIGHT_PIN);
+
+  // 센서 반전 처리 (모듈/배경에 따라 반전 필요)
+  float left = invertSensor ? rawL : 1023 - rawL;
+  float right = invertSensor ? rawR : 1023 - rawR;
+
+  // 정규화: error in [-1 .. 1], 양수이면 우측으로 치우침(조향 양식에 맞게 사용)
+  float sum = left + right;
+  float error = 0.0;
+  if (sum > 0.001) {
+    // 방식: (right - left) / 1023  => -1..1 범위
+    error = (right - left) / 1023.0;
+  } else {
+    // 둘 다 읽기 안되면 라인 상실 처리
+    handleLineLost();
+    return;
+  }
+
+  // PID
+  integral += error * dt;
+  float derivative = (error - prevError) / dt;
+  prevError = error;
+
+  float pidOutput = Kp * error + Ki * integral + Kd * derivative; // 단위: degrees
+  // pidOutput이 커지면 큰 각도로 조향
+
+  // 서보 각도
+  int targetAngle = constrain((int)round(SERVO_CENTER + pidOutput), SERVO_MIN, SERVO_MAX);
+  steering.write(targetAngle);
+
+  // 속도 조절: 회전량이 클수록 속도 줄임
+  float turnMagnitude = fabs((float)(targetAngle - SERVO_CENTER)) / (float)MAX_TURN_ANGLE; // 0..1
+  int currentSpeed = (int)(BASE_SPEED - (BASE_SPEED - MIN_SPEED) * turnMagnitude);
+  currentSpeed = constrain(currentSpeed, MIN_SPEED, 255);
+
+  // 구동 (앞바퀴 조향 -> 뒤 바퀴 동력은 동일 속도)
+  driveForward(currentSpeed);
+
+  // 디버그
+  Serial.print("L:"); Serial.print(rawL);
+  Serial.print(" R:"); Serial.print(rawR);
+  Serial.print(" err:"); Serial.print(error, 3);
+  Serial.print(" pidDeg:"); Serial.print(pidOutput, 2);
+  Serial.print(" ang:"); Serial.print(targetAngle);
+  Serial.print(" spd:"); Serial.println(currentSpeed);
+
+  delay(10); // 루프 주기 (필요시 줄이거나 늘리세요)
+}
+
+// 모터 정지 / 전진 제어(양 모터 동일)
+void driveForward(int pwm) {
+  pwm = constrain(pwm, 0, 255);
+  // 왼 모터 전진
+  digitalWrite(L_IN1, HIGH);
+  digitalWrite(L_IN2, LOW);
+  analogWrite(L_EN, pwm);
+
+  // 오른 모터 전진
+  digitalWrite(R_IN1, HIGH);
+  digitalWrite(R_IN2, LOW);
+  analogWrite(R_EN, pwm);
+}
+
+void setMotorPWM(int pwm) {
+  pwm = constrain(pwm, 0, 255);
+  analogWrite(L_EN, pwm);
+  analogWrite(R_EN, pwm);
+}
+
+void stopMotors() {
+  digitalWrite(L_IN1, LOW);
+  digitalWrite(L_IN2, LOW);
+  digitalWrite(R_IN1, LOW);
+  digitalWrite(R_IN2, LOW);
+  analogWrite(L_EN, 0);
+  analogWrite(R_EN, 0);
+}
+
+// 라인 상실 처리 (단순 검색 동작)
+void handleLineLost() {
+  // 라인 잃어버렸을 때: 서보로 좌우 살짝 스윕하며 탐색
+  Serial.println("Line lost - searching...");
+  stopMotors();
+
+  static int state = 0;
+  static unsigned long t0 = 0;
+  if (millis() - t0 < 200) return;
+  t0 = millis();
+
+  if (state == 0) {
+    steering.write(SERVO_CENTER - 25);
+    driveForward(MIN_SPEED + 20);
+    state = 1;
+  } else if (state == 1) {
+    steering.write(SERVO_CENTER + 25);
+    driveForward(MIN_SPEED + 20);
+    state = 2;
+  } else {
+    // 마지막으로 중앙으로 돌려서 천천히 전진 후 정지
+    steering.write(SERVO_CENTER);
+    stopMotors();
+    state = 0;
+  }
+}
+
+// (선택) 시리얼로 파라미터 변경 등의 입력을 받을 수 있도록 확장 가능
+// 예: Kp/Kd/BASE_SPEED를 시리얼 명령으로 조정하면 튜닝이 편리합니다.
