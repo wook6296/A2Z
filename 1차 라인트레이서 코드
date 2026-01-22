@@ -1,0 +1,95 @@
+#include <Servo.h>
+
+// ===== [핀 설정] 하드웨어 배선에 맞게 확인 필요 =====
+#define ENA 11      // 뒷바퀴 모터 속도 (PWM)
+#define IN1 8       // 뒷바퀴 모터 방향 1
+#define IN2 7       // 뒷바퀴 모터 방향 2
+
+#define SERVO_PIN 5 // 앞바퀴 조향 서보
+#define S_L 2       // 왼쪽 센서 
+#define S_R 3       // 오른쪽 센서
+
+Servo steer;
+// ======= [ 적외선 센서 간격 = 4cm ] ============
+// ===== [ 튜닝 ] 실제 주행하며 이 값을 바꿔야 합니다 =====
+// 속도 설정 (0 ~ 255)
+// 회전 반경이 큰 차체이므로 코너에서 속도를 충분히 줄여야 합니다.
+int straightSpeed = 180;  // 직진 속도
+int turnSpeed     = 100;  // 회전 속도 (중요: 너무 빠르면 튕겨 나감)
+
+// 조향 각도 
+// 90도가 정확히 중앙으로 맞춘다. 조향 각도는 90를 기준으로 +- [40] 잡음 주행에 따라서 조절
+int centerDeg = 90; 
+int leftDeg   = 50;   // 왼쪽 최대 조향 (값이 너무 작으면 서보 무리감)
+int rightDeg  = 130;  // 오른쪽 최대 조향 (값이 너무 크면 서보 무리감)
+
+// ---------------- 모터 제어 함수 ----------------
+void moveCar(int speed, bool forward) {
+  if (forward) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+  } else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+  }
+  analogWrite(ENA, speed);
+}
+
+void motorStop() {
+  analogWrite(ENA, 0);
+}
+
+void setup() {
+  Serial.begin(9600); // 시리얼 통신 9600
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(S_L, INPUT);
+  pinMode(S_R, INPUT);
+
+  steer.attach(SERVO_PIN);
+  steer.write(centerDeg); // 초기 정렬
+
+  motorStop();
+  delay(1000); // 1초 대기 후 출발
+}
+
+void loop() {
+  int L = digitalRead(S_L);
+  int R = digitalRead(S_R);
+
+  // 센서 값에 따라 동작 결정 (센서가 검은 선 감지 시 HIGH(1) 가정)
+  // 만약 흰색 바닥/검은 선인데 반대로 인식되면 !L, !R 로 변경 필요
+
+  // Case 1: 직진 (둘 다 감지 안 됨 - 선이 중앙에 있거나 선 사이)
+  // 보통 센서 간격이 선보다 넓으면 둘 다 0일 때가 직진입니다.
+  if (L == 0 && R == 0) {
+    steer.write(centerDeg);
+    moveCar(straightSpeed, true);
+  }
+  
+  // Case 2: 좌회전 (왼쪽 센서 감지)
+  else if (L == 1 && R == 0) {
+    steer.write(leftDeg);       // 바퀴를 왼쪽으로 꺾음
+    moveCar(turnSpeed, true);   // 속도를 줄임 (중요!)
+    Serial.println("<< LEFT Turn <<"); // 시리얼 출력
+  }
+  
+  // Case 3: 우회전 (오른쪽 센서 감지)
+  else if (L == 0 && R == 1) {
+    steer.write(rightDeg);      // 바퀴를 오른쪽으로 꺾음
+    moveCar(turnSpeed, true);   // 속도를 줄임 (중요!)
+    Serial.println(" >> RIGHT Turn >>"); // 시리얼 출력
+  }
+  
+  // Case 4: 둘 다 감지 (교차로 or 정지선)
+  else if (L == 1 && R == 1) {
+    // 일단 직진 통과하거나 정지하도록 설정
+    steer.write(centerDeg);
+    moveCar(turnSpeed, true);
+    Serial.println("!! STOP !!");   // 시리얼 출력
+  }
+
+  delay(10); // 시스템 안정성을 위한 짧은 대기
+}
