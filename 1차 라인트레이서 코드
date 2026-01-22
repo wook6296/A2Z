@@ -24,6 +24,7 @@ int leftDeg   = 50;   // 왼쪽 최대 조향 (값이 너무 작으면 서보 �
 int rightDeg  = 130;  // 오른쪽 최대 조향 (값이 너무 크면 서보 무리감)
 
 // ---------------- 모터 제어 함수 ----------------
+// ========[배터리 3.7V 2개 사용]===================
 void moveCar(int speed, bool forward) {
   if (forward) {
     digitalWrite(IN1, HIGH);
