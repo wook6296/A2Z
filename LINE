@@ -1,0 +1,125 @@
+#include <Servo.h>
+
+// ===== Motor (L298N 한 채널) =====
+const int ENA = 5;
+const int IN1 = 8;
+const int IN2 = 7;
+
+// ===== Servo =====
+Servo steer;
+const int SERVO_PIN = 3;
+
+// 각도는 멈칫 줄이려고 작게 시작
+const int LEFT = 30, CENTER = 57, RIGHT = 85;
+
+// ===== Line sensors =====
+const int S_L = 2;
+const int S_R = 4;
+const int BLACK = LOW;  // 검정에서 LED 꺼짐 -> 보통 LOW
+
+// ===== Speed 목표값(상대값) =====
+const int MIN_PWM     = 135;  // 너무 낮으면 멈춰서 최소값
+const int SPEED_FAST  = 170;
+const int SPEED_TURN  = 165;
+const int SPEED_LOST  = 160;
+
+// ===== 조향 안정화(필터) =====
+const int STABLE_COUNT = 4;   // 3~6 추천
+int lastState = -1;
+int stable = 0;
+int lastTurn = 0;             // -1:왼쪽 복귀, +1:오른쪽 복귀
+
+// ===== 워밍업 가속 방지: 최고속도 제한 + 가속 제한 =====
+int currentPWM = 0;
+const int PWM_MAX   = 145; // 전체 최고속도 상한(160~180에서 조절)
+const int RAMP_UP   = 2;   // 가속(작을수록 천천히)
+const int RAMP_DOWN = 6;   // 감속(조금 빠르게)
+
+void setup() {
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(S_L, INPUT);
+  pinMode(S_R, INPUT);
+
+  steer.attach(SERVO_PIN);
+  steer.write(CENTER);
+
+  stopMotor();
+  delay(300);
+}
+
+void loop() {
+  // 상태 계산
+  bool leftBlack  = (digitalRead(S_L) == BLACK);
+  bool rightBlack = (digitalRead(S_R) == BLACK);
+
+  // 0: none, 1: L만 검정, 2: R만 검정, 3: 둘다 검정
+  int st = 0;
+  if (!leftBlack && !rightBlack) st = 0;
+  else if ( leftBlack && !rightBlack) st = 1;
+  else if (!leftBlack &&  rightBlack) st = 2;
+  else st = 3;
+
+  // 안정화 필터
+  if (st == lastState) stable++;
+  else { lastState = st; stable = 1; }
+
+  if (stable < STABLE_COUNT) {
+    delay(5);
+    return;
+  }
+
+  // 라인 중앙 유지(반대로 꺾기)
+  int targetSteer = CENTER;
+  int targetSpeed = SPEED_FAST;
+
+  if (st == 1) {              // 왼쪽이 선 -> 오른쪽으로 복귀
+    targetSteer = RIGHT;
+    targetSpeed = SPEED_TURN;
+    lastTurn = +1;
+  } else if (st == 2) {       // 오른쪽이 선 -> 왼쪽으로 복귀
+    targetSteer = LEFT;
+    targetSpeed = SPEED_TURN;
+    lastTurn = -1;
+  } else if (st == 0) {       // 선 놓침
+    targetSteer = (lastTurn > 0) ? RIGHT : (lastTurn < 0) ? LEFT : CENTER;
+    targetSpeed = SPEED_LOST;
+  } else {                    // st == 3 (교차/두꺼운 라인)
+    targetSteer = CENTER;
+    targetSpeed = SPEED_FAST;
+  }
+
+  steer.write(targetSteer);
+  motorForwardLimited(targetSpeed);
+
+  delay(10);
+}
+
+// ===== Motor helper =====
+int fixPWM(int spd) {
+  spd = constrain(spd, 0, 255);
+  if (spd > 0 && spd < MIN_PWM) spd = MIN_PWM;
+  if (spd > PWM_MAX) spd = PWM_MAX;
+  return spd;
+}
+
+void motorForwardLimited(int target) {
+  target = fixPWM(target);
+
+  // 가속/감속 제한
+  if (currentPWM < target) currentPWM = min(currentPWM + RAMP_UP, target);
+  else if (currentPWM > target) currentPWM = max(currentPWM - RAMP_DOWN, target);
+
+  analogWrite(ENA, currentPWM);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+}
+
+void stopMotor() {
+  currentPWM = 0;
+  analogWrite(ENA, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+}
