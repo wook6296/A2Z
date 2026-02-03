@@ -1,0 +1,235 @@
+#include <Servo.h>
+
+#define BT Serial   // HM-10이 실드에서 Serial(0/1) 사용
+
+// ===== Motor (L298N 한 채널) =====
+const int ENA = 5;
+const int IN1 = 8;
+const int IN2 = 7;
+
+// ===== Servo =====
+Servo steer;
+const int SERVO_PIN = 3;
+
+// 조향 각도 (필요하면 조절)
+const int LEFT = 30, CENTER = 57, RIGHT = 85;
+
+// ===== Line sensors =====
+const int S_L = 2;
+const int S_R = 4;
+const int BLACK = LOW;  // 검정에서 LED 꺼짐
+
+// ===== Speed =====
+const int MIN_PWM      = 150; // 너무 낮으면 안 가는 최소 PWM
+const int PWM_MAX      = 165; // 전체 최고속도 상한(너무 빠르면 낮추기)
+
+const int SPEED_FAST   = 170; // 자동 직진 목표(상한 PWM_MAX가 막아줌)
+const int SPEED_TURN   = 165; // 자동 코너 목표
+const int SPEED_LOST   = 160; // 자동 라인 놓침
+const int SPEED_MANUAL = 170; // 수동 속도(상한 PWM_MAX가 막아줌)
+
+// ===== Line tracer filter =====
+const int STABLE_COUNT = 4;   // 그림자 오인식 심하면 5~6, 반응 느리면 2~3
+int lastState = -1;
+int stable = 0;
+int lastTurn = 0;             // -1:왼쪽 복귀, +1:오른쪽 복귀
+
+// ===== Auto ramp (자동에서만 사용) =====
+int currentPWM = 0;
+const int RAMP_UP   = 2;
+const int RAMP_DOWN = 6;
+
+// ===== Mode =====
+enum Mode { AUTO, MANUAL };
+Mode mode = MANUAL;  // 전원 켜면 멈춰서 대기
+
+// ===== Debug (필요 없으면 false) =====
+const bool DEBUG_ECHO = true;
+
+void setup() {
+  pinMode(13, OUTPUT);   // 보드 LED (수신 확인)
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(S_L, INPUT);
+  pinMode(S_R, INPUT);
+
+  steer.attach(SERVO_PIN);
+  steer.write(CENTER);
+
+  BT.begin(9600);
+
+  stopMotor();
+  delay(300);
+}
+
+void loop() {
+  readBT_OneChar();
+
+  if (mode == AUTO) {
+    autoLineTracer();
+  }
+}
+
+// ================= Bluetooth: 한 글자 명령 =================
+void readBT_OneChar() {
+  while (BT.available()) {
+    char cmd = BT.read();
+
+    // 공백/줄바꿈/탭 무시 + (혹시 앱에서 c붙여보내면 c도 무시)
+    if (cmd == '\n' || cmd == '\r' || cmd == ' ' || cmd == '\t' || cmd == 'c') continue;
+
+    // 수신 확인: LED 깜빡
+    digitalWrite(13, HIGH); delay(15); digitalWrite(13, LOW);
+
+    if (DEBUG_ECHO) {
+      BT.print("CMD:");
+      BT.println(cmd);
+    }
+
+    handleCommand(cmd);
+  }
+}
+
+void handleCommand(char cmd) {
+  // 모드 전환
+  if (cmd == 'A') {          // 자동 ON
+    mode = AUTO;
+    steer.write(CENTER);
+    stopMotor();
+    if (DEBUG_ECHO) BT.println("AUTO ON");
+    return;
+  }
+  if (cmd == 'B') {          // 수동 ON
+    mode = MANUAL;
+    steer.write(CENTER);
+    stopMotor();
+    if (DEBUG_ECHO) BT.println("MANUAL ON");
+    return;
+  }
+
+  // 수동 조종 명령이 오면 무조건 수동으로 강제 전환(앱에서 B가 가끔 안 와도 됨)
+  if (cmd == '1' || cmd == '2' || cmd == '3' || cmd == '4') {
+    mode = MANUAL;
+  }
+
+  if (mode != MANUAL) return;
+
+  // ===== 수동은 "즉시 출력" (램프 없음) =====
+  switch (cmd) {
+    case '1': // 전진
+      steer.write(CENTER);
+      motorForwardManual(SPEED_MANUAL);
+      break;
+
+    case '2': // 우회전(조향 + 전진)
+      steer.write(RIGHT);
+      motorForwardManual(SPEED_MANUAL);
+      break;
+
+    case '3': // 좌회전
+      steer.write(LEFT);
+      motorForwardManual(SPEED_MANUAL);
+      break;
+
+    case '4': // 후진
+      steer.write(CENTER);
+      motorBackManual(SPEED_MANUAL);
+      break;
+  }
+}
+
+// ================= AUTO: LineTracer =================
+void autoLineTracer() {
+  bool leftBlack  = (digitalRead(S_L) == BLACK);
+  bool rightBlack = (digitalRead(S_R) == BLACK);
+
+  // 0: none, 1: L만 검정, 2: R만 검정, 3: 둘다 검정
+  int st = 0;
+  if (!leftBlack && !rightBlack) st = 0;
+  else if ( leftBlack && !rightBlack) st = 1;
+  else if (!leftBlack &&  rightBlack) st = 2;
+  else st = 3;
+
+  // 안정화 필터
+  if (st == lastState) stable++;
+  else { lastState = st; stable = 1; }
+
+  if (stable < STABLE_COUNT) {
+    delay(5);
+    return;
+  }
+
+  int targetSteer = CENTER;
+  int targetSpeed = SPEED_FAST;
+
+  // 중앙 유지(반대로 조향)
+  if (st == 1) {              // 왼쪽 센서가 선 -> 오른쪽으로 복귀
+    targetSteer = RIGHT;
+    targetSpeed = SPEED_TURN;
+    lastTurn = +1;
+  } else if (st == 2) {       // 오른쪽 센서가 선 -> 왼쪽으로 복귀
+    targetSteer = LEFT;
+    targetSpeed = SPEED_TURN;
+    lastTurn = -1;
+  } else if (st == 0) {       // 선 놓침
+    targetSteer = (lastTurn > 0) ? RIGHT : (lastTurn < 0) ? LEFT : CENTER;
+    targetSpeed = SPEED_LOST;
+  } else {                    // st == 3 (교차/두꺼운 라인)
+    targetSteer = CENTER;
+    targetSpeed = SPEED_FAST;
+  }
+
+  steer.write(targetSteer);
+  motorForwardAutoLimited(targetSpeed);
+
+  delay(10);
+}
+
+// ================= Motor helpers =================
+int clampPWM(int spd) {
+  spd = constrain(spd, 0, 255);
+  if (spd > 0 && spd < MIN_PWM) spd = MIN_PWM;
+  if (spd > PWM_MAX) spd = PWM_MAX;
+  return spd;
+}
+
+// ===== 자동: 램프 적용 =====
+void motorForwardAutoLimited(int target) {
+  target = clampPWM(target);
+
+  if (currentPWM < target) currentPWM = min(currentPWM + RAMP_UP, target);
+  else if (currentPWM > target) currentPWM = max(currentPWM - RAMP_DOWN, target);
+
+  analogWrite(ENA, currentPWM);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+}
+
+// ===== 수동: 즉시 적용(힘 있게) =====
+void motorForwardManual(int spd) {
+  spd = clampPWM(spd);
+  currentPWM = spd;
+
+  analogWrite(ENA, currentPWM);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+}
+
+void motorBackManual(int spd) {
+  spd = clampPWM(spd);
+  currentPWM = spd;
+
+  analogWrite(ENA, currentPWM);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+}
+
+void stopMotor() {
+  currentPWM = 0;
+  analogWrite(ENA, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+}
